@@ -16,19 +16,19 @@ import datetime
 import json
 
 
-last_action_time = None
-electricity_on = None
+electricity_on: bool
+last_action_time: float
+chat_ids: set[int]
+message_queue: deque[str] = deque()
 
 with open('config.json') as file:
     config = json.load(file)
 
 bot = telebot.TeleBot(config.get("BOT_TOKEN"))
 local_server_address = "http://localhost:8080"
-chat_ids = set()
-messages_queue :deque[str] = deque()
 
 
-def constant_check():
+def state_update_loop():
     global electricity_on, last_action_time
 
     while True:
@@ -38,19 +38,20 @@ def constant_check():
 
             time_passed = format_time(time() - last_action_time)
             action_word = "увімкнули" if new_state else "вимкнули"
-            emoji = "💡" if new_state else "🚫"
+            emoji       = "💡"        if new_state else "🚫"
+            message = f"{emoji} електроенергію {action_word} після {time_passed} в {time_now()}"
 
-            messages_queue.append(f"{emoji} електроенергію {action_word} після {time_passed} в {time_now()}")
+            message_queue.append(message)
 
             electricity_on = new_state
             last_action_time = time()
             
         try:
-            while len(messages_queue) > 0:
-                message = messages_queue[0]
+            while len(message_queue) > 0:
+                message = message_queue[0]
                 for id in chat_ids:
                     bot.send_message(id, message)
-                messages_queue.popleft()
+                message_queue.popleft()
         except:
             print("failed to send message")
 
@@ -72,32 +73,47 @@ def format_time(seconds):
     hours, remainder = divmod(remainder, 3600)
     minutes, seconds = divmod(remainder, 60)
 
+    time_str = f"{int(hours):02}:{int(minutes):02}:{int(seconds):02}"
+
     if days > 0:
-        return f"{days} day{'' if days == 1 else 's'} {hours:02}:{minutes:02}:{seconds:02}"
-    else:
-        return f"{hours:02}:{minutes:02}:{seconds:02}"
+        time_str = f"{days} day{'' if days == 1 else 's'} {time_str}"
+
+    return time_str
 
 def time_now():
     return datetime.datetime.now().strftime('%H:%M %d %B')
 
+def load_chat_ids():
+    global chat_ids
+    try:
+        with open('chat_ids.json', 'r') as file:
+            chat_ids = set(json.load(file))
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        print("Exception on loading chat_ids, creating new", e)
+        chat_ids = set()
+
+def save_chat_ids():
+    with open('chat_ids.json', 'w') as file:
+        json.dump(list(chat_ids), file)
 
 
 @bot.message_handler(commands=['start'])
 def start(message: types.Message):
     bot.reply_to(message, f"Привіт {message.from_user.first_name} 😊")
     chat_ids.add(message.chat.id)
+    save_chat_ids()
 
 
 @bot.message_handler(commands=['check'])
 def check(message: types.Message):
     time_passed = format_time( time() - last_action_time )
-    on = is_electricity_on()
+    is_on = is_electricity_on()
 
-    if on is None:
-        bot.reply_to(message, f'‼ none. Помилка локального серверу')
+    if is_on is None:
+        bot.reply_to(message, '‼ none. Помилка локального серверу')
         return
 
-    if on:
+    if is_on:
         bot.reply_to(message, f'💡 електроенергія вже є {time_passed}')
     else:
         bot.reply_to(message, f'🚫 електроенергії немає {time_passed}')
@@ -105,15 +121,16 @@ def check(message: types.Message):
 
 
 def main():
-    global last_action_time, electricity_on
-    last_action_time = time()
+    global electricity_on, last_action_time
     electricity_on = is_electricity_on()
+    last_action_time = time()
+    load_chat_ids()
 
-    Thread(target=constant_check).start()
+    Thread(target=state_update_loop).start()
 
     while True:
         try:
-            bot.polling(none_stop=True)
+            bot.polling(non_stop=True)
         except Exception as e:
             print(f"bot.polling() exception: {e}")
             sleep(15)
